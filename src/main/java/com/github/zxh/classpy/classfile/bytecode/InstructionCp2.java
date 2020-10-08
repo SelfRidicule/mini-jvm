@@ -39,4 +39,11 @@ public class InstructionCp2 extends Instruction {
         }
         return U2CpIndex.class.cast(getParts().get(1)).getValue();
     }
+
+    public int getTargetClassIndex() {
+        if (getOpcode() != Opcode._new && getOpcode() != Opcode.checkcast) {
+            throw new IllegalStateException("Only _new instructions have target class index!");
+        }
+        return U2CpIndex.class.cast(getParts().get(1)).getValue();
+    }
 }

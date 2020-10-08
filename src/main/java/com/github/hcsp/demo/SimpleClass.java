@@ -1,4 +1,4 @@
-package com.github.hcsp;
+package com.github.hcsp.demo;
 
 public class SimpleClass {
     public static void main(String[] args) {

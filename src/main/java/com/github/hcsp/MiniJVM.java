@@ -1,30 +1,32 @@
 package com.github.hcsp;
 
+import com.github.hcsp.demo.MyClassLoader;
 import com.github.zxh.classpy.classfile.ClassFile;
 import com.github.zxh.classpy.classfile.ClassFileParser;
 import com.github.zxh.classpy.classfile.MethodInfo;
 import com.github.zxh.classpy.classfile.bytecode.Bipush;
 import com.github.zxh.classpy.classfile.bytecode.Instruction;
+import com.github.zxh.classpy.classfile.bytecode.InstructionCp1;
 import com.github.zxh.classpy.classfile.bytecode.InstructionCp2;
 import com.github.zxh.classpy.classfile.constant.*;
+import com.github.zxh.classpy.classfile.datatype.U1CpIndex;
+import com.github.zxh.classpy.common.FilePart;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
-import java.util.Objects;
 import java.util.Stack;
-import java.util.stream.Stream;
 
 /**
  * 这是一个用来学习的JVM
  */
 public class MiniJVM {
-    private String mainClass;
-    private String[] classPathEntries;
+    private String mainClassName;
+    private MiniJVMClassLoader appClassLoader;
 
-    public static void main(String[] args) {
-        new MiniJVM("target/classes", "com.github.hcsp.BranchClass").start();
+    public static void main(String[] args) throws ClassNotFoundException {
+        new MiniJVM("target/classes", "com.github.hcsp.demo.SameClassLoaderClass").start();
     }
 
     /**
@@ -32,25 +34,26 @@ public class MiniJVM {
      *
      * @param classPath 启动时的classpath，使用{@link java.io.File#pathSeparator}的分隔符，我们支持文件夹
      */
-    public MiniJVM(String classPath, String mainClass) {
-        this.mainClass = mainClass;
-        this.classPathEntries = classPath.split(File.pathSeparator);
+    public MiniJVM(String classPath, String mainClassName) {
+        this.mainClassName = mainClassName;
+        this.appClassLoader = new MiniJVMClassLoader(classPath.split(File.pathSeparator), MiniJVMClassLoader.EXT_CLASSLOADED);
     }
 
     /**
      * 启动并运行该虚拟机
      */
-    public void start() {
-        ClassFile mainClassFile = loadClassFromClassPath(mainClass);
-
-        MethodInfo methodInfo = mainClassFile.getMethod("main").get(0);
-
+    public void start() throws ClassNotFoundException {
+        //
+        MiniJVMCLass mainClass = appClassLoader.loadClass(mainClassName);
+        //
+        MethodInfo methodInfo = mainClass.getMethod("main").get(0);
+        //
         Stack<StackFrame> methodStack = new Stack<>();
-
-        Object[] localVariablesForMainStackFrame = new Object[methodInfo.getMaxStack()];
+        //
+        Object[] localVariablesForMainStackFrame = new Object[methodInfo.getMaxLocals()];
         localVariablesForMainStackFrame[0] = null;
 
-        methodStack.push(new StackFrame(localVariablesForMainStackFrame, methodInfo, mainClassFile));
+        methodStack.push(new StackFrame(localVariablesForMainStackFrame, methodInfo, mainClass));
 
         PCRegister pcRegister = new PCRegister(methodStack);
 
@@ -81,7 +84,7 @@ public class MiniJVM {
                 case invokestatic: {
                     String className = getClassNameFromInvokeInstruction(instruction, pcRegister.getTopFrameClassConstantPool());
                     String methodName = getMethodNameFromInvokeInstruction(instruction, pcRegister.getTopFrameClassConstantPool());
-                    ClassFile classFile = loadClassFromClassPath(className);
+                    MiniJVMCLass classFile = appClassLoader.loadClass(className);
                     MethodInfo targetMethodInfo = classFile.getMethod(methodName).get(0);
 
                     //应该分析方法的参数，从操作数栈上弹出对应数量的参数放在新栈帧的局部变量表中
@@ -114,6 +117,14 @@ public class MiniJVM {
                         Object param = pcRegister.getTopFrame().popFromOperandStack();
                         Object thisObject = pcRegister.getTopFrame().popFromOperandStack();
                         System.out.println(param);
+                    } else if ("com/github/hcsp/demo/MyClassLoader".equals(className) && "loadClass".equals(methodName)) {
+                        String classNameParam = (String) pcRegister.getTopFrame().popFromOperandStack();
+                        MiniJVMObject thisObject = (MiniJVMObject) pcRegister.getTopFrame().popFromOperandStack();
+                        MiniJVMCLass result = ((MyClassLoader) thisObject.getRealJavaObject()).loadClass(classNameParam);
+                        pcRegister.getTopFrame().pushObjectToOperandStack(result);
+                    } else if ("com/github/hcsp/MiniJVMCLass".equals(className) && "newInstance".equals(methodName)) {
+                        MiniJVMCLass thisObject = (MiniJVMCLass) pcRegister.getTopFrame().popFromOperandStack();
+                        pcRegister.getTopFrame().pushObjectToOperandStack(thisObject.newInstance());
                     } else {
                         throw new IllegalStateException("Not implemented yet!");
                     }
@@ -179,11 +190,59 @@ public class MiniJVM {
                     pcRegister.getTopFrame().pushObjectToOperandStack(result);
                 }
                 break;
-                case imul:{ //value1和value2都必须是int类型。这些值来自操作数堆栈。int结果是value1*value2。结果被推送到操作数堆栈上。
+                case imul: { //value1和value2都必须是int类型。这些值来自操作数堆栈。int结果是value1*value2。结果被推送到操作数堆栈上。
                     int value2 = (int) pcRegister.getTopFrame().popFromOperandStack();
                     int value1 = (int) pcRegister.getTopFrame().popFromOperandStack();
                     int result = value1 * value2;
                     pcRegister.getTopFrame().pushObjectToOperandStack(result);
+                }
+                break;
+                case _new: { //无符号indexbyte1和indexbyte2用于在当前类（§2.6）的运行时常量池中构造索引，其中索引的值为（indexbyte1<<8）| indexbyte2。索引处的运行时常量池项必须是对类或接口类型的符号引用。已解析命名的类或接口类型（§5.4.3.1），并应产生一个类类型。该类的新实例的内存从垃圾收集堆中分配，新对象的实例变量被初始化为其默认初始值（§2.3，§2.4）。objectref（对实例的引用）被推送到操作数堆栈上。
+                    String className = getClassNameFromNewOrCheckCastInstruction(instruction, pcRegister.getTopFrameClassConstantPool());
+                    MiniJVMCLass klass = pcRegister.getTopFrame().getKlass().getClassLoader().loadClass(className);
+                    pcRegister.getTopFrame().pushObjectToOperandStack(klass.newInstance());
+                }
+                break;
+                case dup: {  //复制操作数堆栈上的顶部值，并将复制的值推送到操作数堆栈上。除非值是1类计算类型的值（§2.11.1），否则不得使用dup指令。
+                    pcRegister.getTopFrame().pushObjectToOperandStack(pcRegister.getTopFrame().peekOperandStack());
+                }
+                break;
+                case invokespecial: { //...
+                    pcRegister.getTopFrame().popFromOperandStack();
+                }
+                break;
+                case astore_1: { //索引是一个无符号字节，它必须是当前帧的局部变量数组的索引（§2.6）。操作数堆栈顶部的objectref必须是returnAddress类型或reference类型。它从操作数堆栈中弹出，并且索引处的局部变量的值被设置为objectref
+                    pcRegister.getTopFrame().astore(1);
+                }
+                break;
+                case astore_2: { //索引是一个无符号字节，它必须是当前帧的局部变量数组的索引（§2.6）。操作数堆栈顶部的objectref必须是returnAddress类型或reference类型。它从操作数堆栈中弹出，并且索引处的局部变量的值被设置为objectref
+                    pcRegister.getTopFrame().astore(2);
+                }
+                break;
+                case aload_1: { //索引是一个无符号字节，它必须是当前帧的局部变量数组的索引（§2.6）。索引处的局部变量必须包含引用。索引处局部变量中的objectref被推送到操作数堆栈上。
+                    pcRegister.getTopFrame().aload(1);
+                }
+                break;
+                case aload_2: { //索引是一个无符号字节，它必须是当前帧的局部变量数组的索引（§2.6）。索引处的局部变量必须包含引用。索引处局部变量中的objectref被推送到操作数堆栈上。
+                    pcRegister.getTopFrame().aload(2);
+                }
+                break;
+                case ldc: { //从运行时常量池推送到操作数栈顶
+                    FilePart filePart = InstructionCp1.class.cast(instruction).getParts().get(1);
+                    U1CpIndex u1CpIndex = (U1CpIndex) filePart;
+                    int constantPoolIndex = u1CpIndex.getValue();
+                    String str = pcRegister.getTopFrameClassConstantPool().getConstantDesc(constantPoolIndex);
+                    pcRegister.getTopFrame().pushObjectToOperandStack(str);
+                }
+                break;
+                case checkcast: { //The objectref must be of type reference. The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at the index must be a symbolic reference to a class, array, or interface type.
+                    String className = getClassNameFromNewOrCheckCastInstruction(instruction, pcRegister.getTopFrameClassConstantPool()).replace("/",".");
+                    MiniJVMCLass targetClass = pcRegister.getTopFrame().getKlass().getClassLoader().loadClass(className);
+                    MiniJVMObject objectOnStack = (MiniJVMObject) pcRegister.getTopFrame().peekOperandStack();
+                    if (!objectOnStack.getKlass().getName().equals(targetClass.getName())
+                            || objectOnStack.getKlass().getClassLoader() != targetClass.getClassLoader()) {
+                        throw new ClassCastException("Cant cast type " + objectOnStack.getKlass().getName() + " to type " + targetClass.getName());
+                    }
                 }
                 break;
                 case _return:
@@ -193,6 +252,12 @@ public class MiniJVM {
                     throw new IllegalStateException("Opcode " + instruction + " not implemented yet!");
             }
         }
+    }
+
+    private String getClassNameFromNewOrCheckCastInstruction(Instruction instruction, ConstantPool constantPool) {
+        int targetClassIndex = InstructionCp2.class.cast(instruction).getTargetClassIndex();
+        ConstantClassInfo classInfo = constantPool.getClassInfo(targetClassIndex);
+        return constantPool.getUtf8String(classInfo.getNameIndex());
     }
 
     private String getClassNameFromInvokeInstruction(Instruction instruction, ConstantPool constantPool) {
@@ -207,14 +272,6 @@ public class MiniJVM {
         ConstantMethodrefInfo methodrefInfo = constantPool.getMethodrefInfo(methodIndex);
         ConstantClassInfo classInfo = methodrefInfo.getClassInfo(constantPool);
         return methodrefInfo.getMethodNameAndType(constantPool).getName(constantPool);
-    }
-
-    private ClassFile loadClassFromClassPath(String fqcn) {
-        return Stream.of(classPathEntries)
-                .map(entry -> tryLoad(entry, fqcn))
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException(new ClassNotFoundException(fqcn)));
     }
 
     private ClassFile tryLoad(String entry, String fqcn) {
@@ -259,7 +316,7 @@ public class MiniJVM {
         Object[] localVariables;
         Stack<Object> operandStack = new Stack<>();
         MethodInfo methodInfo;
-        ClassFile classFile;
+        MiniJVMCLass klass;
 
         int currentInstructionIndex;
 
@@ -268,13 +325,13 @@ public class MiniJVM {
         }
 
         public ClassFile getClassFile() {
-            return classFile;
+            return klass.getClassFile();
         }
 
-        public StackFrame(Object[] localVariables, MethodInfo methodInfo, ClassFile classFile) {
+        public StackFrame(Object[] localVariables, MethodInfo methodInfo, MiniJVMCLass klass) {
             this.localVariables = localVariables;
             this.methodInfo = methodInfo;
-            this.classFile = classFile;
+            this.klass = klass;
         }
 
         public void pushObjectToOperandStack(Object object) {
@@ -312,9 +369,6 @@ public class MiniJVM {
             this.methodInfo = methodInfo;
         }
 
-        public void setClassFile(ClassFile classFile) {
-            this.classFile = classFile;
-        }
 
         public int getCurrentInstructionIndex() {
             return currentInstructionIndex;
@@ -322,6 +376,22 @@ public class MiniJVM {
 
         public void setCurrentInstructionIndex(int currentInstructionIndex) {
             this.currentInstructionIndex = currentInstructionIndex;
+        }
+
+        public MiniJVMCLass getKlass() {
+            return klass;
+        }
+
+        public Object peekOperandStack() {
+            return operandStack.peek();
+        }
+
+        public void astore(int i) {
+            localVariables[i] = operandStack.pop();
+        }
+
+        public void aload(int i) {
+            operandStack.push(localVariables[i]);
         }
     }
 }
